@@ -117,10 +117,19 @@ class HimitAPI:
             inner = resp["response"]
             code = str(inner.get("resultCode", inner.get("code", "?")))
             if code != "0":
+                error_code = str(inner.get("errorCode", ""))
                 msg = inner.get("errorDesc", inner.get("msg", "no detail"))
-                if code in ("401", "1001", "1002", "10001"):
-                    raise HimitAuthError(f"[{label}] Auth error {code}: {msg}")
-                raise HimitAPIError(f"[{label}] Server error {code}: {msg}")
+                detail_code = f"{code}/{error_code}" if error_code else code
+                if (
+                    code in ("401", "1001", "1002", "10001")
+                    or error_code in (
+                        "401", "1001", "1002", "10001",
+                        "100026", "600904", "611702",
+                    )
+                    or "token" in msg.lower()
+                ):
+                    raise HimitAuthError(f"[{label}] Auth error {detail_code}: {msg}")
+                raise HimitAPIError(f"[{label}] Server error {detail_code}: {msg}")
             return inner
         code = str(resp.get("code", resp.get("result", "?")))
         if code not in ("0", "200", "success"):
@@ -169,11 +178,11 @@ class HimitAPI:
             raise HimitAPIError(f"No accessToken in login response: {resp}")
         return {
             "access_token":          token,
-            "refresh_token":         inner.get("refreshToken", ""),
-            "token_expire_secs":     inner.get("tokenExpireTime", 7200),
-            "refresh_expire_secs":   inner.get("refreshTokenExpiredTime", 2592000),
-            "token_created_ms":      int(inner.get("tokenCreateTime", time.time() * 1000)),
-            "customer_id":           str(inner.get("customerId", "")),
+            "refresh_token":         inner.get("refreshToken") or "",
+            "token_expire_secs":     inner.get("tokenExpireTime") or 7200,
+            "refresh_expire_secs":   inner.get("refreshTokenExpiredTime") or 2592000,
+            "token_created_ms":      int(inner.get("tokenCreateTime") or (time.time() * 1000)),
+            "customer_id":           str(inner.get("customerId") or ""),
         }
 
     async def refresh_token(self, refresh_token: str) -> dict:
@@ -199,10 +208,10 @@ class HimitAPI:
             raise HimitAPIError("No accessToken in refresh response")
         return {
             "access_token":        token,
-            "refresh_token":       inner.get("refreshToken", refresh_token),
-            "token_expire_secs":   inner.get("tokenExpireTime", 7200),
-            "refresh_expire_secs": inner.get("refreshTokenExpiredTime", 2592000),
-            "token_created_ms":    int(inner.get("tokenCreateTime", time.time() * 1000)),
+            "refresh_token":       inner.get("refreshToken") or refresh_token,
+            "token_expire_secs":   inner.get("tokenExpireTime") or 7200,
+            "refresh_expire_secs": inner.get("refreshTokenExpiredTime") or 2592000,
+            "token_created_ms":    int(inner.get("tokenCreateTime") or (time.time() * 1000)),
         }
 
     async def get_home_list(self, access_token: str) -> list[dict]:

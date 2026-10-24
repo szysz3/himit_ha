@@ -7,6 +7,7 @@ import time
 from datetime import timedelta
 from typing import Any
 
+import aiohttp
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.exceptions import ConfigEntryAuthFailed
@@ -93,8 +94,8 @@ class HimitCoordinator(DataUpdateCoordinator):
                 self._apply_new_tokens(new_data)
                 _LOGGER.info("Access token refreshed successfully")
                 return
-            except HimitAuthError:
-                _LOGGER.warning("Token refresh failed — attempting re-login")
+            except (HimitAPIError, aiohttp.ClientError) as exc:
+                _LOGGER.warning("Token refresh failed (%s) — attempting re-login", exc)
 
         # Refresh token expired or refresh failed — try a full re-login
         # using stored credentials before giving up
@@ -118,6 +119,8 @@ class HimitCoordinator(DataUpdateCoordinator):
             raise ConfigEntryAuthFailed(
                 "Re-login failed — password may have changed"
             ) from exc
+        except (HimitAPIError, aiohttp.ClientError) as exc:
+            raise UpdateFailed(f"Re-login failed: {exc}") from exc
 
         self._apply_new_tokens(new_data)
         _LOGGER.info("Re-login successful — new tokens acquired")
@@ -146,6 +149,14 @@ class HimitCoordinator(DataUpdateCoordinator):
         home_id = self._token_data[CONF_HOME_ID]
         try:
             resp = await self.api.get_devices(self.access_token, home_id)
+        except HimitAuthError:
+            _LOGGER.warning("Access token rejected during discovery — attempting re-login")
+            await self._try_relogin()
+            try:
+                resp = await self.api.get_devices(self.access_token, home_id)
+            except HimitAPIError as exc:
+                _LOGGER.warning("Device discovery failed after re-login: %s", exc)
+                return
         except HimitAPIError as exc:
             _LOGGER.warning("Device discovery failed: %s", exc)
             return
@@ -185,11 +196,20 @@ class HimitCoordinator(DataUpdateCoordinator):
             props_list = await self.api.get_device_property(
                 self.access_token, device_refs
             )
-        except HimitAuthError as exc:
-            raise ConfigEntryAuthFailed(
-                f"Authentication error: {exc}"
-            ) from exc
-        except HimitAPIError as exc:
+        except HimitAuthError:
+            _LOGGER.warning("Access token rejected by server — attempting re-login")
+            await self._try_relogin()
+            try:
+                props_list = await self.api.get_device_property(
+                    self.access_token, device_refs
+                )
+            except HimitAuthError as exc:
+                raise ConfigEntryAuthFailed(
+                    f"Authentication error: {exc}"
+                ) from exc
+            except (HimitAPIError, aiohttp.ClientError) as exc:
+                raise UpdateFailed(str(exc)) from exc
+        except (HimitAPIError, aiohttp.ClientError) as exc:
             raise UpdateFailed(str(exc)) from exc
 
         # Parse each device property into a clean flat dict
@@ -213,9 +233,16 @@ class HimitCoordinator(DataUpdateCoordinator):
         """
         await self._ensure_token()
         props = [{"cmdType": cmd_type, "cmdValue": cmd_value}]
-        await self.api.set_device_property(
-            self.access_token, wifi_id, device_id, props,
-        )
+        try:
+            await self.api.set_device_property(
+                self.access_token, wifi_id, device_id, props,
+            )
+        except HimitAuthError:
+            _LOGGER.warning("Access token rejected on command — attempting re-login")
+            await self._try_relogin()
+            await self.api.set_device_property(
+                self.access_token, wifi_id, device_id, props,
+            )
         try:
             await self.api.usr_control_record(
                 self.access_token, wifi_id, device_id, props,
@@ -230,9 +257,16 @@ class HimitCoordinator(DataUpdateCoordinator):
     ) -> None:
         """Send multiple control commands at once."""
         await self._ensure_token()
-        await self.api.set_device_property(
-            self.access_token, wifi_id, device_id, commands
-        )
+        try:
+            await self.api.set_device_property(
+                self.access_token, wifi_id, device_id, commands
+            )
+        except HimitAuthError:
+            _LOGGER.warning("Access token rejected on command — attempting re-login")
+            await self._try_relogin()
+            await self.api.set_device_property(
+                self.access_token, wifi_id, device_id, commands
+            )
         try:
             await self.api.usr_control_record(
                 self.access_token, wifi_id, device_id, commands,
